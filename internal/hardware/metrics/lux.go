@@ -1,14 +1,59 @@
 package metrics
 
-import "strconv"
+import "os"
 
-// LuxPath is the file the light sensor's reading comes from, empty when the board has none. The board
-// declares two and binds whichever one is fitted, so which index it lands on has to be looked for —
-// once, at start-up, rather than on every reading.
+// LuxPath is the file the light sensor's reading comes from, empty when the board has none.
+//
+// Biscuit device trees declare more than one ALS and bind whichever chip is fitted. The reading
+// shows up in different sysfs shapes depending on that binding:
+//
+//   - IIO channel files under iio:deviceN (e.g. tsl258x → illuminance0_input)
+//   - Vendor attributes on the i2c device itself (e.g. tsl2540 → als_lux)
+//
+// Probe once at start-up for a readable lux file rather than assuming a fixed path.
 func (r Reader) LuxPath() string {
-	for i := range 8 {
-		at := r.path("sys/bus/iio/devices/iio:device"+strconv.Itoa(i)) + "/illuminance0_input"
+	if at := r.firstLux(r.iioLuxFiles()); at != "" {
+		return at
+	}
+	return r.firstLux(r.i2cLuxFiles())
+}
 
+// iioLuxFiles are standard IIO illuminance channel names, in preference order, on every present
+// iio device. Newer kernels use in_illuminance_*; older Amazon drivers use illuminance0_input.
+func (r Reader) iioLuxFiles() []string {
+	return r.deviceAttrFiles("sys/bus/iio/devices", []string{
+		"illuminance0_input",
+		"in_illuminance_input",
+	})
+}
+
+// i2cLuxFiles are vendor ALS attributes on i2c children. Prefer the calibrated reading when the
+// driver publishes both.
+func (r Reader) i2cLuxFiles() []string {
+	return r.deviceAttrFiles("sys/bus/i2c/devices", []string{
+		"als_calibrated_lux",
+		"als_lux",
+	})
+}
+
+// deviceAttrFiles joins each child of dir with each attr name, preserving attr preference order
+// across devices (try every device's best attr before falling to the next attr).
+func (r Reader) deviceAttrFiles(dir string, attrs []string) []string {
+	entries, err := os.ReadDir(r.path(dir))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, attr := range attrs {
+		for _, entry := range entries {
+			out = append(out, r.path(dir+"/"+entry.Name()+"/"+attr))
+		}
+	}
+	return out
+}
+
+func (r Reader) firstLux(candidates []string) string {
+	for _, at := range candidates {
 		if _, err := number(at); err == nil {
 			return at
 		}

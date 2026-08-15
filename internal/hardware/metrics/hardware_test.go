@@ -145,3 +145,88 @@ func TestLux(t *testing.T) {
 		t.Errorf("Lux() = %v, want 556", got)
 	}
 }
+
+// Some biscuit boards bind tsl2540 instead of the IIO tsl258x path. Lux must still be found.
+func TestLuxFallsBackToTsl2540AlsLux(t *testing.T) {
+	root := t.TempDir()
+	at := filepath.Join(root, "sys/bus/i2c/devices/0-0039/als_lux")
+	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(at, []byte("38\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := Reader{Root: root}
+	path := r.LuxPath()
+	if path == "" {
+		t.Fatal("LuxPath() found no sensor")
+	}
+	if got := r.Lux(path); !got.Known || got.Value != 38 {
+		t.Errorf("Lux() = %v, want 38", got)
+	}
+}
+
+// When the Amazon driver publishes both, prefer the calibrated lux reading.
+func TestLuxPrefersCalibratedAlsLux(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"sys/bus/i2c/devices/0-0039/als_lux":             "38\n",
+		"sys/bus/i2c/devices/0-0039/als_calibrated_lux": "42\n",
+	}
+	for path, body := range files {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := Reader{Root: root}
+	if got := r.Lux(r.LuxPath()); !got.Known || got.Value != 42 {
+		t.Errorf("Lux() = %v, want calibrated 42", got)
+	}
+}
+
+// Modern IIO naming should be found without hardcoding device indices.
+func TestLuxFindsModernIIOIlluminance(t *testing.T) {
+	root := t.TempDir()
+	at := filepath.Join(root, "sys/bus/iio/devices/iio:device3/in_illuminance_input")
+	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(at, []byte("77\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := Reader{Root: root}
+	if got := r.Lux(r.LuxPath()); !got.Known || got.Value != 77 {
+		t.Errorf("Lux() = %v, want 77", got)
+	}
+}
+
+// IIO is preferred when both layouts are present on the same board.
+func TestLuxPrefersIIOOverAlsLux(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"sys/bus/iio/devices/iio:device0/illuminance0_input": "101\n",
+		"sys/bus/i2c/devices/0-0039/als_lux":                 "38\n",
+	}
+	for path, body := range files {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := Reader{Root: root}
+	path := r.LuxPath()
+	if got := r.Lux(path); !got.Known || got.Value != 101 {
+		t.Errorf("Lux() = %v, want IIO reading 101", got)
+	}
+}
